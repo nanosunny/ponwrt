@@ -1,30 +1,82 @@
-  - name: 初始化云端编译依赖环境
-    env:
-      DEBIAN_FRONTEND: noninteractive
-    run: |
-      sudo apt update -y
-      sudo apt full-upgrade -y
-      sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
-      # 也可以直接使用ImmortalWrt官方一键环境脚本完成初始化，和官方编译流程完全对齐
-      # sudo bash -c 'bash <(curl -s https://build-scripts.immortalwrt.org/init_build_environment.sh)'
+name: 编译HG5585F CT版PonWrt固件并自动发布Release
 
-  - name: 更新并安装所有软件包源feeds
-    run: |
-      ./scripts/feeds update -a
-      ./scripts/feeds install -a
+# 触发条件：支持手动在GitHub Actions页面触发、推送v开头标签时自动触发
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '自定义发布版本标签（例如 v1.0.0）'
+        required: true
+        default: 'v1.0.0'
+  push:
+    tags:
+      - 'v*'
 
-  - name: 加载HG5585F对应的AN7581芯片编译配置
-    run: cp configs/${{ env.BUILD_CONFIG }} .config
+# 配置任务运行权限，允许上传发布Release
+permissions:
+  contents: write
 
-  - name: 生成完整编译依赖配置
-    run: make defconfig
+jobs:
+  build-firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取GitHub Action运行环境源码
+        uses: actions/checkout@v4
 
-  - name: 全CPU核心并行编译固件
-    run: make -j$(nproc)
+      - name: 安装编译依赖环境
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt update -y
+          sudo apt full-upgrade -y
+          sudo apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+          bzip2 ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+          g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libelf-dev \
+          libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libpython3-dev \
+          libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm lrzsz mkisofs msmtp nano \
+          ninja-build p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils \
+          python3-pyelftools qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs \
+          upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
 
-  - name: 下载编译生成的.itb格式固件
-    uses: actions/upload-artifact@v4
-    with:
-      name: PonWrt-HG5585F-云端编译固件
-      path: ${{ env.FIRMWARE_OUTPUT_DIR }}*.itb
-      retention-days: 30
+      - name: 克隆PonWrt项目源码
+        run: git clone https://github.com/pbs05/ponwrt.git ponwrt-project
+
+      - name: 进入源码根目录并更新安装软件源feeds
+        working-directory: ./ponwrt-project
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: 导入HG5585F CT版对应配置文件
+        working-directory: ./ponwrt-project
+        run: |
+          # HG5585F CT版适配AN7583方案，加载对应配置
+          cp configs/an7583.config .config
+          make defconfig
+
+      - name: 全核心并行编译固件
+        working-directory: ./ponwrt-project
+        run: make -j$(nproc)
+
+      - name: 整理编译生成的固件产物
+        working-directory: ./ponwrt-project
+        run: |
+          mkdir -p ./firmware_output
+          # 从AN7583方案的编译输出目录拷贝所有固件文件
+          cp -r bin/targets/airoha/an7583/* ./firmware_output/
+          # 生成固件说明文档
+          echo "HG5585F CT版 PonWrt 编译产物，编译时间：$(date +"%Y-%m-%d %H:%M:%S")" > ./firmware_output/firmware_info.txt
+
+      - name: 自动发布到GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          # 优先使用推送的tag，手动触发时使用自定义输入的版本标签
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: "HG5585F CT版 PonWrt 固件发布 ${{ github.event.inputs.release_tag || github.ref_name }}"
+          body: |
+            本次自动编译生成HG5585F CT版PonWrt固件
+            编译流程基于官方PonWrt源码自动构建
+            ⚠️ 刷写前请务必提前使用AN758x-Stock2UBI工具备份设备原厂闪存，刷写完成后需要通过U-Boot Web或者LuCI的「网络 → PON → 配置 → PON板卡数据」恢复原厂校准与身份数据，避免PON网络注册失败，所有操作风险请自行承担
+          files: ./ponwrt-project/firmware_output/*
+          draft: false
+          prerelease: false
